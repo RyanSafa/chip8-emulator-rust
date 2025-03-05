@@ -1,7 +1,7 @@
 use crate::chip8_io;
 use rand::distr::{Distribution, Uniform};
 use std::fs::File;
-use std::io::{Read, SeekFrom, Seek};
+use std::io::{Read, Seek, SeekFrom};
 use std::{cell::RefCell, rc::Rc};
 
 pub const FONT_SIZE: usize = 80;
@@ -38,8 +38,8 @@ impl Opcode {
     }
 }
 
-pub struct Chip8<'a> {
-    io: Rc<RefCell<chip8_io::Chip8IO<'a>>>,
+pub struct Chip8 {
+    io: Rc<RefCell<chip8_io::Chip8IO>>,
     primary_color: u32,
     secondary_color: u32,
     pc: usize,
@@ -53,9 +53,9 @@ pub struct Chip8<'a> {
     distrib: Uniform<u16>,
 }
 
-impl<'a> Chip8<'a> {
+impl Chip8 {
     pub fn new(
-        io: &Rc<RefCell<chip8_io::Chip8IO<'a>>>,
+        io: &Rc<RefCell<chip8_io::Chip8IO>>,
         primary_color: u32,
         secondary_color: u32,
     ) -> Self {
@@ -321,7 +321,9 @@ impl<'a> Chip8<'a> {
     pub fn load_rom(self: &mut Self, rom_file: &mut File) {
         let len = rom_file.seek(SeekFrom::End(0)).unwrap();
         rom_file.seek(SeekFrom::Start(0)).unwrap();
-        rom_file.read_exact(&mut self.memory[ROM_START_ADDR.. ROM_START_ADDR + len as usize]).unwrap();
+        rom_file
+            .read_exact(&mut self.memory[ROM_START_ADDR..ROM_START_ADDR + len as usize])
+            .unwrap();
     }
 
     pub fn load_font(self: &mut Self, font_buffer: &[u8], font_size: usize) {

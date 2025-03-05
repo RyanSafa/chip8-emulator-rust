@@ -102,20 +102,29 @@ impl Sdl2Mngr {
     }
 }
 
-pub struct Chip8IO<'a> {
-    key_pressed: HashMap<&'a str, bool>,
+pub struct Chip8IO {
+    key_pressed: HashMap<&'static str, bool>,
     display_buffer: [u8; DISPLAY_HEIGHT * DISPLAY_WIDTH * 4],
     sdl_mngr: Sdl2Mngr,
 }
 
 fn construct_color(pixels: &[u8]) -> u32 {
-    ((pixels[0] as u32) << 24)
-        | ((pixels[1] as u32) << 16)
-        | ((pixels[2] as u32) << 8)
-        | (pixels[3] as u32)
+    let mut color: u32 = 0;
+    for i in 0..4 {
+        let rgba_component = (pixels[i] as u32) << 24 - (i * 8);
+        color |= rgba_component;
+    }
+    color
 }
 
-impl<'a> Chip8IO<'a> {
+fn deconstruct_color(pixels: &mut [u8], color: u32) {
+    for i in 0..4 {
+        let rgba_component = (color >> (24 - (i * 8)) & 0xFF) as u8;
+        pixels[i] = rgba_component;
+    }
+}
+
+impl Chip8IO {
     pub fn new(scale_factor: u32) -> Self {
         return Self {
             key_pressed: HashMap::new(),
@@ -126,10 +135,7 @@ impl<'a> Chip8IO<'a> {
 
     pub fn write_pixel(self: &mut Self, row: usize, col: usize, color: u32) {
         let index = ((row * DISPLAY_WIDTH) + col) * 4;
-        self.display_buffer[index] = ((color >> 24) & 0xFF) as u8; // Red
-        self.display_buffer[index + 1] = ((color >> 16) & 0xFF) as u8; // Green
-        self.display_buffer[index + 2] = ((color >> 8) & 0xFF) as u8; // Blue
-        self.display_buffer[index + 3] = (color & 0xFF) as u8; // Alpha
+        deconstruct_color(&mut self.display_buffer[index..index + 4], color);
     }
 
     pub fn get_pixel_color(self: &Self, row: usize, col: usize) -> u32 {
@@ -141,12 +147,9 @@ impl<'a> Chip8IO<'a> {
         self.sdl_mngr
             .texture
             .as_mut()
-            .with_lock(
-                None,
-                |buffer: &mut [u8], _pitch: usize| {
-                    buffer.copy_from_slice(&self.display_buffer);
-                },
-            )
+            .with_lock(None, |buffer: &mut [u8], _pitch: usize| {
+                buffer.copy_from_slice(&self.display_buffer);
+            })
             .unwrap();
         self.sdl_mngr
             .canvas
