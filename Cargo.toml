@@ -5,3 +5,7 @@ edition = "2024"
 
 [dependencies]
 rand = "0.9.0"
+[dependencies.sdl2]
+version = "0.37.0"
+default-features = false
+features = ["unsafe_textures"]

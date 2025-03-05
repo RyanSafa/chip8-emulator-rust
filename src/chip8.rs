@@ -1,16 +1,16 @@
-use rand::Rng;
+use crate::chip8_io;
 use rand::distr::{Distribution, Uniform};
-use std::rc::Rc;
+use std::fs::File;
+use std::io::{Read, SeekFrom, Seek};
+use std::{cell::RefCell, rc::Rc};
 
-use crate::chip8_io::Chip8IO;
-
+pub const FONT_SIZE: usize = 80;
 const NUM_REGISTERS: usize = 0x10;
 const MEMORY_SIZE: usize = 0x1000;
 const ROM_START_ADDR: usize = 0x200;
 const FONT_START_ADDR: usize = 0x50;
 
 #[derive(Debug)]
-
 struct Opcode {
     raw: u16,
     op_type: u8,
@@ -38,8 +38,10 @@ impl Opcode {
     }
 }
 
-#[derive(Debug)]
 pub struct Chip8<'a> {
+    io: Rc<RefCell<chip8_io::Chip8IO<'a>>>,
+    primary_color: u32,
+    secondary_color: u32,
     pc: usize,
     i: usize,
     delay_timer: u8,
@@ -47,24 +49,27 @@ pub struct Chip8<'a> {
     registers: [u8; NUM_REGISTERS],
     stack: Vec<usize>,
     memory: [u8; MEMORY_SIZE],
-    font: &'a [u32],
-    io: Rc<Chip8IO>,
     rng: rand::rngs::ThreadRng,
     distrib: Uniform<u16>,
 }
 
 impl<'a> Chip8<'a> {
-    pub fn new(io: Rc<Chip8IO>, font: &'a [u32]) -> Self {
+    pub fn new(
+        io: &Rc<RefCell<chip8_io::Chip8IO<'a>>>,
+        primary_color: u32,
+        secondary_color: u32,
+    ) -> Self {
         return Chip8 {
+            io: Rc::clone(io),
+            primary_color,
+            secondary_color,
+            pc: ROM_START_ADDR,
             i: 0,
             delay_timer: 0,
             sound_timer: 0,
             registers: [0; NUM_REGISTERS],
             stack: Vec::new(),
             memory: [0; MEMORY_SIZE],
-            pc: ROM_START_ADDR,
-            font,
-            io: Rc::clone(&io),
             rng: rand::rng(),
             distrib: Uniform::new(0, 256).unwrap(),
         };
@@ -81,16 +86,20 @@ impl<'a> Chip8<'a> {
     fn exec_op_type0(self: &mut Self, opcode: &Opcode) {
         match opcode.get_nn() {
             0x0E0 => {
-                // fix later
+                for row in 0..chip8_io::DISPLAY_HEIGHT {
+                    for col in 0..chip8_io::DISPLAY_WIDTH {
+                        self.io
+                            .borrow_mut()
+                            .write_pixel(row, col, self.secondary_color);
+                    }
+                }
             }
             0x0EE => {
                 self.pc = self.stack.pop().unwrap_or_else(|| {
                     panic!("Opcode: {:#?} - Popped of stack when emtpy", opcode)
                 });
             }
-            _ => {
-                panic!("Did not recognize opcode: {:#?}", opcode)
-            }
+            _ => {}
         }
     }
 
@@ -104,30 +113,29 @@ impl<'a> Chip8<'a> {
     }
 
     fn exec_op_type3(self: &mut Self, opcode: &Opcode) {
-        if self.registers[opcode.x as usize] == self.registers[opcode.get_nnn() as usize] {
+        if self.registers[opcode.x as usize] == opcode.get_nn() {
             self.skip_pc();
         }
     }
 
     fn exec_op_type4(self: &mut Self, opcode: &Opcode) {
-        if self.registers[opcode.x as usize] != self.registers[opcode.get_nnn() as usize] {
+        if self.registers[opcode.x as usize] != opcode.get_nn() {
             self.skip_pc();
         }
     }
 
     fn exec_op_type5(self: &mut Self, opcode: &Opcode) {
-        if self.registers[opcode.x as usize] != self.registers[opcode.y as usize] {
+        if self.registers[opcode.x as usize] == self.registers[opcode.y as usize] {
             self.skip_pc();
         }
     }
 
     fn exec_op_type6(self: &mut Self, opcode: &Opcode) {
-        self.registers[opcode.x as usize] = self.registers[opcode.get_nn() as usize];
+        self.registers[opcode.x as usize] = opcode.get_nn();
     }
 
     fn exec_op_type7(self: &mut Self, opcode: &Opcode) {
-        self.registers[opcode.x as usize] =
-            self.registers[opcode.x as usize] + self.registers[opcode.get_nn() as usize]
+        self.registers[opcode.x as usize] = self.registers[opcode.x as usize] + opcode.get_nn();
     }
 
     fn exec_op_type8(self: &mut Self, opcode: &Opcode) {
@@ -190,7 +198,7 @@ impl<'a> Chip8<'a> {
     }
 
     fn exec_op_type10(self: &mut Self, opcode: &Opcode) {
-        self.pc = opcode.get_nnn() as usize;
+        self.i = opcode.get_nnn() as usize;
     }
 
     fn exec_op_type11(self: &mut Self, opcode: &Opcode) {
@@ -203,7 +211,43 @@ impl<'a> Chip8<'a> {
     }
 
     fn exec_op_type13(self: &mut Self, opcode: &Opcode) {
-        // skip
+        let x_coord = self.registers[opcode.x as usize] % (chip8_io::DISPLAY_WIDTH as u8);
+        let y_coord = self.registers[opcode.y as usize] % (chip8_io::DISPLAY_HEIGHT as u8);
+
+        for i in 0..opcode.n {
+            let new_y_coord = y_coord + i;
+            if new_y_coord < 0 || new_y_coord >= (chip8_io::DISPLAY_HEIGHT as u8) {
+                continue;
+            }
+            for j in 0..8 {
+                let new_x_coord = x_coord + j;
+                if new_x_coord < 0 || new_x_coord >= (chip8_io::DISPLAY_WIDTH as u8) {
+                    continue;
+                }
+                let mask = 1 << (7 - j);
+                let sprite_color = (self.memory[self.i + i as usize] & mask) >> (7 - j);
+                let prev_frame_color = self
+                    .io
+                    .borrow_mut()
+                    .get_pixel_color(new_y_coord as usize, new_x_coord as usize);
+                if sprite_color == 1 {
+                    if prev_frame_color == self.primary_color {
+                        self.set_vf(1);
+                        self.io.borrow_mut().write_pixel(
+                            new_y_coord as usize,
+                            new_x_coord as usize,
+                            self.secondary_color,
+                        );
+                    } else {
+                        self.io.borrow_mut().write_pixel(
+                            new_y_coord as usize,
+                            new_x_coord as usize,
+                            self.primary_color,
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn exec_op_type14(self: &mut Self, opcode: &Opcode) {
@@ -232,7 +276,7 @@ impl<'a> Chip8<'a> {
                 self.sound_timer = self.registers[opcode.x as usize];
             }
             0x1E => {
-                self.i = self.registers[opcode.x as usize] as usize;
+                self.i += self.registers[opcode.x as usize] as usize;
                 if self.i >= 0x1000 {
                     self.set_vf(1);
                 }
@@ -261,17 +305,29 @@ impl<'a> Chip8<'a> {
                 }
             }
             0x55 => {
-                for (i, value) in (0..opcode.x + 1).enumerate() {
-                    self.registers[self.i + i] = value;
+                for i in 0..opcode.x + 1 {
+                    self.memory[self.i + (i as usize)] = self.registers[i as usize];
                 }
             }
             0x65 => {
                 for i in 0..opcode.x + 1 {
-                    self.registers[i as usize] = self.registers[self.i + i as usize];
+                    self.registers[i as usize] = self.memory[self.i + i as usize];
                 }
             }
             _ => {}
         }
+    }
+
+    pub fn load_rom(self: &mut Self, rom_file: &mut File) {
+        let len = rom_file.seek(SeekFrom::End(0)).unwrap();
+        rom_file.seek(SeekFrom::Start(0)).unwrap();
+        rom_file.read_exact(&mut self.memory[ROM_START_ADDR.. ROM_START_ADDR + len as usize]).unwrap();
+    }
+
+    pub fn load_font(self: &mut Self, font_buffer: &[u8], font_size: usize) {
+        self.memory[FONT_START_ADDR..FONT_START_ADDR + font_size]
+            .as_mut()
+            .copy_from_slice(font_buffer);
     }
 
     pub fn update_timers(self: &mut Self) {
@@ -284,9 +340,8 @@ impl<'a> Chip8<'a> {
     }
 
     pub fn run_cycle(self: &mut Self) {
-        let opcod_raw = ((self.memory[self.pc] >> 8) | self.memory[self.pc + 1]) as u16;
+        let opcod_raw = ((self.memory[self.pc] as u16) << 8) | (self.memory[self.pc + 1] as u16);
         let opcode = Opcode::new(opcod_raw);
-
         self.skip_pc();
 
         match opcode.op_type {
