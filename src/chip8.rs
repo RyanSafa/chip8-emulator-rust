@@ -1,21 +1,17 @@
 use crate::chip8_io;
 use rand::distr::{Distribution, Uniform};
-use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::{cell::RefCell, rc::Rc};
 
-pub const FONT_SIZE: usize = 80;
-const NUM_REGISTERS: usize = 0x10;
 const MEMORY_SIZE: usize = 0x1000;
 const ROM_START_ADDR: usize = 0x200;
 const FONT_START_ADDR: usize = 0x50;
-
-type Result<T> = std::result::Result<T, Chip8Error>;
+const NUM_REGISTERS: usize = 0x10;
 
 #[derive(Debug)]
 pub enum Chip8Error {
     InvaidOpcode(u16),
-    StackUnderflow(Opcode), 
+    StackUnderflow(Opcode),
 }
 
 impl std::fmt::Display for Chip8Error {
@@ -31,6 +27,7 @@ impl std::fmt::Display for Chip8Error {
     }
 }
 
+type Result<T> = std::result::Result<T, Chip8Error>;
 
 #[derive(Debug, Clone)]
 pub struct Opcode {
@@ -62,8 +59,6 @@ impl Opcode {
 
 pub struct Chip8 {
     io: Rc<RefCell<chip8_io::Chip8IO>>,
-    primary_color: u32,
-    secondary_color: u32,
     pc: usize,
     i: usize,
     delay_timer: u8,
@@ -76,15 +71,9 @@ pub struct Chip8 {
 }
 
 impl Chip8 {
-    pub fn new(
-        io: &Rc<RefCell<chip8_io::Chip8IO>>,
-        primary_color: u32,
-        secondary_color: u32,
-    ) -> Self {
+    pub fn new(io: &Rc<RefCell<chip8_io::Chip8IO>>) -> Self {
         return Chip8 {
             io: Rc::clone(io),
-            primary_color,
-            secondary_color,
             pc: ROM_START_ADDR,
             i: 0,
             delay_timer: 0,
@@ -114,9 +103,7 @@ impl Chip8 {
             0x0E0 => {
                 for row in 0..chip8_io::DISPLAY_HEIGHT {
                     for col in 0..chip8_io::DISPLAY_WIDTH {
-                        self.io
-                            .borrow_mut()
-                            .write_pixel(row, col, self.secondary_color);
+                        self.io.borrow_mut().write_pixel(row, col, false);
                     }
                 }
                 Ok(())
@@ -281,18 +268,18 @@ impl Chip8 {
                     .borrow_mut()
                     .get_pixel_color(new_y_coord as usize, new_x_coord as usize);
                 if sprite_color == 1 {
-                    if prev_frame_color == self.primary_color {
+                    if prev_frame_color == self.io.borrow_mut().primary_color {
                         self.set_vf(1);
                         self.io.borrow_mut().write_pixel(
                             new_y_coord as usize,
                             new_x_coord as usize,
-                            self.secondary_color,
+                            false,
                         );
                     } else {
                         self.io.borrow_mut().write_pixel(
                             new_y_coord as usize,
                             new_x_coord as usize,
-                            self.primary_color,
+                            true,
                         );
                     }
                 }
@@ -402,7 +389,7 @@ impl Chip8 {
         }
     }
 
-    pub fn load_rom(&mut self, rom_file: &mut File) {
+    pub fn load_rom(&mut self, rom_file: &mut std::fs::File) {
         let len = rom_file.seek(SeekFrom::End(0)).expect("Failed to load ROM");
 
         rom_file
@@ -426,6 +413,9 @@ impl Chip8 {
         }
         if self.sound_timer > 0 {
             self.sound_timer -= 1;
+            self.io.borrow().play_audio();
+        } else {
+            self.io.borrow().pause_audio();
         }
     }
 
@@ -452,7 +442,7 @@ impl Chip8 {
             0xE => self.exec_op_type14(&opcode)?,
             0xF => self.exec_op_type15(&opcode)?,
             _ => Err(Chip8Error::InvaidOpcode(opcode.raw))?,
-        }
+        };
 
         Ok(())
     }

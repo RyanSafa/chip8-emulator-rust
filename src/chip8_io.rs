@@ -1,6 +1,5 @@
-extern crate sdl2;
-use ::std::collections::HashMap;
-use sdl2::{rect::*, render::*, video::*};
+use sdl2::{audio::*, render::*, video::*};
+use std::collections::HashMap;
 
 pub const DISPLAY_WIDTH: usize = 64;
 pub const DISPLAY_HEIGHT: usize = 32;
@@ -25,17 +24,46 @@ impl DroppableTexture {
 }
 impl AsRef<Texture> for DroppableTexture {
     fn as_ref(&self) -> &Texture {
-        self.texture.as_ref().unwrap()
+        self.texture.as_ref().expect("Missing texture")
     }
 }
 impl AsMut<Texture> for DroppableTexture {
     fn as_mut(&mut self) -> &mut Texture {
-        self.texture.as_mut().unwrap()
+        self.texture.as_mut().expect("Missing texture")
     }
 }
 impl Drop for DroppableTexture {
     fn drop(&mut self) {
-        unsafe { std::mem::take(&mut self.texture).unwrap().destroy() };
+        unsafe {
+            std::mem::take(&mut self.texture)
+                .expect("Missing texture")
+                .destroy()
+        };
+    }
+}
+
+struct SquareWave {
+    phase: f32,
+    phase_increment: f32,
+    volume: f32,
+}
+
+impl AudioCallback for SquareWave {
+    type Channel = i16;
+
+    fn callback(&mut self, buffer: &mut [Self::Channel]) {
+        for i in buffer.iter_mut() {
+            self.phase += self.phase_increment;
+            if self.phase >= 1f32 {
+                self.phase -= 1f32
+            }
+            let sample = if self.phase < 0.5 {
+                (i16::max_value() as f32) * self.volume
+            } else {
+                (i16::min_value() as f32) * self.volume
+            };
+            *i = sample as i16;
+        }
     }
 }
 
@@ -44,8 +72,27 @@ pub struct Sdl2Mngr {
     canvas: Canvas<Window>,
     _texture_creator: TextureCreator<WindowContext>,
     texture: DroppableTexture,
-    src_rect: Rect,
-    dst_rect: Rect,
+    audio_device: Option<AudioDevice<SquareWave>>,
+}
+
+fn create_audio_device(sdl_context: &sdl2::Sdl) -> Option<AudioDevice<SquareWave>> {
+    let audio_subsystem = sdl_context.audio().ok()?;
+
+    let desired_spec = AudioSpecDesired {
+        freq: Some(44_100),
+        channels: Some(1),
+        samples: Some(4096),
+    };
+
+    Some(
+        audio_subsystem
+            .open_playback(None, &desired_spec, |spec| SquareWave {
+                phase: 0.0,
+                phase_increment: 440.0 / spec.freq as f32,
+                volume: 0.05,
+            })
+            .ok()?,
+    )
 }
 
 fn create_window(sdl_context: &sdl2::Sdl, scale_factor: u32) -> Window {
@@ -81,34 +128,27 @@ impl Sdl2Mngr {
             )
             .expect("Failed to create texture.");
 
+        let audio_device = create_audio_device(&sdl_context);
+
         return Self {
             sdl_context,
             canvas,
             _texture_creator: texture_creator,
             texture: DroppableTexture::new(texture),
-            src_rect: Rect::new(
-                0,
-                0,
-                DISPLAY_WIDTH.try_into().unwrap(),
-                DISPLAY_HEIGHT.try_into().unwrap(),
-            ),
-            dst_rect: Rect::new(
-                0,
-                0,
-                <usize as TryInto<u32>>::try_into(DISPLAY_WIDTH).unwrap() * scale_factor,
-                <usize as TryInto<u32>>::try_into(DISPLAY_HEIGHT).unwrap() * scale_factor,
-            ),
+            audio_device,
         };
     }
 }
 
 pub struct Chip8IO {
-    key_pressed: HashMap<&'static str, bool>,
+    pub primary_color: u32,
+    pub secondary_color: u32,
+    keys_pressed: HashMap<&'static str, bool>,
     display_buffer: [u8; DISPLAY_HEIGHT * DISPLAY_WIDTH * 4],
     sdl_mngr: Sdl2Mngr,
 }
 
-fn construct_color(pixels: &[u8]) -> u32 {
+fn construct_color_from_slice(pixels: &[u8]) -> u32 {
     let mut color: u32 = 0;
     color |= (pixels[0] as u32) << 24;
     color |= (pixels[1] as u32) << 16;
@@ -117,7 +157,7 @@ fn construct_color(pixels: &[u8]) -> u32 {
     color
 }
 
-fn deconstruct_color(pixels: &mut [u8], color: u32) {
+fn write_color_to_slice(pixels: &mut [u8], color: u32) {
     pixels[0] = ((color & 0xFF000000) >> 24) as u8;
     pixels[1] = ((color & 0x00FF0000) >> 16) as u8;
     pixels[2] = ((color & 0x0000FF00) >> 8) as u8;
@@ -125,26 +165,43 @@ fn deconstruct_color(pixels: &mut [u8], color: u32) {
 }
 
 impl Chip8IO {
-    pub fn new(scale_factor: u32) -> Self {
+    pub fn new(scale_factor: u32, primary_color: u32, secondary_color: u32) -> Self {
+        let mut display_buffer = [0u8; DISPLAY_WIDTH * DISPLAY_HEIGHT * 4];
+        for i in 0..DISPLAY_HEIGHT {
+            for j in 0..DISPLAY_WIDTH {
+                let index = ((i * DISPLAY_WIDTH) + j) * 4;
+                write_color_to_slice(&mut display_buffer[index..index + 4], secondary_color);
+            }
+        }
+
         return Self {
-            key_pressed: KEYS
+            primary_color,
+            secondary_color,
+            keys_pressed: KEYS
                 .iter()
                 .enumerate()
                 .map(|(_, &value)| (value, false))
                 .collect(),
-            display_buffer: [0; DISPLAY_WIDTH * DISPLAY_HEIGHT * 4],
+            display_buffer,
             sdl_mngr: Sdl2Mngr::new(scale_factor),
         };
     }
 
-    pub fn write_pixel(&mut self, row: usize, col: usize, color: u32) {
+    pub fn write_pixel(&mut self, row: usize, col: usize, primary_color: bool) {
         let index = ((row * DISPLAY_WIDTH) + col) * 4;
-        deconstruct_color(&mut self.display_buffer[index..index + 4], color);
+        write_color_to_slice(
+            &mut self.display_buffer[index..index + 4],
+            if primary_color {
+                self.primary_color
+            } else {
+                self.secondary_color
+            },
+        );
     }
 
     pub fn get_pixel_color(&self, row: usize, col: usize) -> u32 {
         let index = ((row * DISPLAY_WIDTH) + col) * 4;
-        construct_color(&self.display_buffer[index..index + 4])
+        construct_color_from_slice(&self.display_buffer[index..index + 4])
     }
 
     pub fn render_frame(&mut self) {
@@ -154,20 +211,20 @@ impl Chip8IO {
             .with_lock(None, |buffer: &mut [u8], _pitch: usize| {
                 buffer.copy_from_slice(&self.display_buffer);
             })
-            .unwrap();
+            .expect("Locking texture failed");
         self.sdl_mngr
             .canvas
-            .copy(
-                self.sdl_mngr.texture.as_mut(),
-                self.sdl_mngr.src_rect,
-                self.sdl_mngr.dst_rect,
-            )
-            .unwrap();
+            .copy(self.sdl_mngr.texture.as_mut(), None, None)
+            .expect("Copying texture failed");
         self.sdl_mngr.canvas.present();
     }
 
     pub fn poll_input(&mut self) -> bool {
-        let mut events = self.sdl_mngr.sdl_context.event_pump().unwrap();
+        let mut events = self
+            .sdl_mngr
+            .sdl_context
+            .event_pump()
+            .expect("Error polling input");
         loop {
             for event in events.poll_iter() {
                 match event {
@@ -175,15 +232,15 @@ impl Chip8IO {
                         return false;
                     }
                     sdl2::event::Event::KeyUp { scancode, .. } => {
-                        let key_name = scancode.unwrap().name();
-                        if self.key_pressed.contains_key(key_name) {
-                            self.key_pressed.insert(key_name, false);
+                        let key_name = scancode.expect("Missing scancode").name();
+                        if self.keys_pressed.contains_key(key_name) {
+                            self.keys_pressed.insert(key_name, false);
                         }
                     }
                     sdl2::event::Event::KeyDown { scancode, .. } => {
-                        let key_name = scancode.unwrap().name();
-                        if self.key_pressed.contains_key(key_name) {
-                            self.key_pressed.insert(key_name, true);
+                        let key_name = scancode.expect("Missing scancode").name();
+                        if self.keys_pressed.contains_key(key_name) {
+                            self.keys_pressed.insert(key_name, true);
                         }
                     }
                     _ => {}
@@ -195,6 +252,18 @@ impl Chip8IO {
     }
 
     pub fn is_key_pressed(&self, key_num: u8) -> bool {
-        self.key_pressed[KEYS[key_num as usize]]
+        self.keys_pressed[KEYS[key_num as usize]]
+    }
+
+    pub fn play_audio(&self) {
+        if let Some(audio_device) = self.sdl_mngr.audio_device.as_ref() {
+            audio_device.resume()
+        }
+    }
+
+    pub fn pause_audio(&self) {
+        if let Some(audio_device) = self.sdl_mngr.audio_device.as_ref() {
+            audio_device.pause()
+        }
     }
 }
