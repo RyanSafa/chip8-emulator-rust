@@ -75,7 +75,7 @@ impl Sdl2Mngr {
         let texture_creator = canvas.texture_creator();
         let texture = texture_creator
             .create_texture_streaming(
-                sdl2::pixels::PixelFormatEnum::RGBA8888,
+                sdl2::pixels::PixelFormatEnum::RGBA32,
                 DISPLAY_WIDTH as u32,
                 DISPLAY_HEIGHT as u32,
             )
@@ -110,40 +110,44 @@ pub struct Chip8IO {
 
 fn construct_color(pixels: &[u8]) -> u32 {
     let mut color: u32 = 0;
-    for i in 0..4 {
-        let rgba_component = (pixels[i] as u32) << 24 - (i * 8);
-        color |= rgba_component;
-    }
+    color |= (pixels[0] as u32) << 24;
+    color |= (pixels[1] as u32) << 16;
+    color |= (pixels[2] as u32) << 8;
+    color |= pixels[3] as u32;
     color
 }
 
 fn deconstruct_color(pixels: &mut [u8], color: u32) {
-    for i in 0..4 {
-        let rgba_component = (color >> (24 - (i * 8)) & 0xFF) as u8;
-        pixels[i] = rgba_component;
-    }
+    pixels[0] = ((color & 0xFF000000) >> 24) as u8;
+    pixels[1] = ((color & 0x00FF0000) >> 16) as u8;
+    pixels[2] = ((color & 0x0000FF00) >> 8) as u8;
+    pixels[3] = (color & 0x000000FF) as u8;
 }
 
 impl Chip8IO {
     pub fn new(scale_factor: u32) -> Self {
         return Self {
-            key_pressed: HashMap::new(),
+            key_pressed: KEYS
+                .iter()
+                .enumerate()
+                .map(|(_, &value)| (value, false))
+                .collect(),
             display_buffer: [0; DISPLAY_WIDTH * DISPLAY_HEIGHT * 4],
             sdl_mngr: Sdl2Mngr::new(scale_factor),
         };
     }
 
-    pub fn write_pixel(self: &mut Self, row: usize, col: usize, color: u32) {
+    pub fn write_pixel(&mut self, row: usize, col: usize, color: u32) {
         let index = ((row * DISPLAY_WIDTH) + col) * 4;
         deconstruct_color(&mut self.display_buffer[index..index + 4], color);
     }
 
-    pub fn get_pixel_color(self: &Self, row: usize, col: usize) -> u32 {
+    pub fn get_pixel_color(&self, row: usize, col: usize) -> u32 {
         let index = ((row * DISPLAY_WIDTH) + col) * 4;
         construct_color(&self.display_buffer[index..index + 4])
     }
 
-    pub fn render_frame(self: &mut Self) {
+    pub fn render_frame(&mut self) {
         self.sdl_mngr
             .texture
             .as_mut()
@@ -162,7 +166,7 @@ impl Chip8IO {
         self.sdl_mngr.canvas.present();
     }
 
-    pub fn poll_input(self: &mut Self) -> bool {
+    pub fn poll_input(&mut self) -> bool {
         let mut events = self.sdl_mngr.sdl_context.event_pump().unwrap();
         loop {
             for event in events.poll_iter() {
@@ -190,7 +194,7 @@ impl Chip8IO {
         return true;
     }
 
-    pub fn is_key_pressed(self: &Self, key_num: u8) -> bool {
+    pub fn is_key_pressed(&self, key_num: u8) -> bool {
         self.key_pressed[KEYS[key_num as usize]]
     }
 }
