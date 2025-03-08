@@ -70,7 +70,6 @@ impl AudioCallback for SquareWave {
 pub struct Sdl2Mngr {
     sdl_context: sdl2::Sdl,
     canvas: Canvas<Window>,
-    _texture_creator: TextureCreator<WindowContext>,
     texture: DroppableTexture,
     audio_device: Option<AudioDevice<SquareWave>>,
 }
@@ -133,7 +132,6 @@ impl Sdl2Mngr {
         return Self {
             sdl_context,
             canvas,
-            _texture_creator: texture_creator,
             texture: DroppableTexture::new(texture),
             audio_device,
         };
